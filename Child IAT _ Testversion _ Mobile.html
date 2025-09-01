@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Child‑IAT (Offline, Ein‑Datei)</title>
+<style>
+  :root{
+    --bg:#f8fafc; --fg:#0f172a; --muted:#64748b; --ok:#16a34a; --bad:#dc2626;
+    --left-bg:#e0f2fe; --left-br:#7dd3fc; --right-bg:#fee2e2; --right-br:#fca5a5;
+  }
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif}
+  .wrap{max-width:980px;margin:80px auto;padding:0 20px;text-align:center}
+  h1,h2{margin:.2em 0}
+  p{font-size:18px;line-height:1.5}
+  .btn{display:inline-block;padding:12px 18px;border-radius:12px;background:#111827;color:#fff;text-decoration:none;border:none;cursor:pointer}
+  .btn:disabled{opacity:.6;cursor:default}
+  .cats{position:fixed;top:16px;left:0;right:0;display:flex;justify-content:space-between;pointer-events:none}
+  .cat{font-weight:700;font-size:20px;padding:8px 12px;border-radius:12px;margin:0 16px;max-width:40vw}
+  .cat.left{background:var(--left-bg);border:2px solid var(--left-br)}
+  .cat.right{background:var(--right-bg);border:2px solid var(--right-br)}
+  .keyhint{position:fixed;bottom:18px;right:18px;font-size:14px;opacity:.7}
+  .stim{font-size:64px;display:inline-block;padding:26px 32px;border-radius:18px;background:#fff;border:2px dashed #cbd5e1}
+  .feedback{font-size:72px;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);}
+  .feedback.ok{color:var(--ok)} .feedback.bad{color:var(--bad)}
+  .muted{color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="cats" id="cats" aria-hidden="true" style="display:none">
+  <div class="cat left" id="catL"></div>
+  <div class="cat right" id="catR"></div>
+</div>
+<div class="wrap" id="app"></div>
+<div class="keyhint">Linke Taste: <b>F</b> &nbsp;|&nbsp; Rechte Taste: <b>J</b></div>
+<script>
+(function(){
+  // ========================== Konfiguration ===========================
+  const N_PRACTICE_TARGET = 16;
+  const N_PRACTICE_ATTR   = 16;
+  const N_COMBO_A         = 32;
+  const N_PRACTICE_SWAP   = 16;
+  const N_COMBO_B         = 32;
+  const ERROR_PENALTY_MS  = 600;
+
+  const TARGET_LEFT_LABEL_A  = 'Kinder mit heller Haut';
+  const TARGET_RIGHT_LABEL_A = 'Kinder mit dunkler Haut';
+
+  const ATTR_LEFT_LABEL = 'Gut (🌞❤️😊⭐️)';
+  const ATTR_RIGHT_LABEL = 'Schlecht (🌧️💔☹️⚡️)';
+
+  const TARGET_LEFT_STIMULI  = ['👧🏻','👦🏻','🧒🏻','👩🏻','👨🏻'];
+  const TARGET_RIGHT_STIMULI = ['👧🏿','👦🏿','🧒🏿','👩🏿','👨🏿'];
+  const GOOD_STIMULI = ['🌞','❤️','😊','⭐️','🍀'];
+  const BAD_STIMULI  = ['🌧️','💔','☹️','⚡️','🕷️'];
+
+  const startCompatibleLeft = Math.random() < 0.5; // counterbalancing
+
+  // ============================ Utilities =============================
+  const $app = document.getElementById('app');
+  const $cats = document.getElementById('cats');
+  const $catL = document.getElementById('catL');
+  const $catR = document.getElementById('catR');
+
+  function html(strings,...vals){ return strings.reduce((a,s,i)=>a + s + (vals[i]??''),''); }
+  function sampleWithReplacement(arr,n){ const out=[]; for(let i=0;i<n;i++){ out.push(arr[Math.floor(Math.random()*arr.length)]);} return out; }
+  function shuffle(a){ for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]];} return a; }
+
+  // ============================= Timeline =============================
+  let timeline = [];
+
+  function screenIntro(){
+    return {type:'screen', name:'intro', render(){
+      hideCats();
+      $app.innerHTML = html`
+        <h1>Willkommen!</h1>
+        <p>Du sortierst Dinge so schnell wie möglich nach <b>links</b> (Taste F) oder <b>rechts</b> (Taste J).</p>
+        <p>Manchmal sind es <b>Personen‑Emojis</b>, manchmal <b>schöne</b> oder <b>nicht so schöne</b> Dinge.</p>
+        <p class="muted">Das ist kein Test über dich – wir messen nur, wie schnell Dinge zusammenpassen.</p>
+        <p><button class="btn" id="start">Los geht's</button></p>`;
+      document.getElementById('start').onclick = next;
+    }}
+  }
+
+  function pauseScreen(text){
+    return {type:'screen', name:'pause', render(){
+      hideCats();
+      $app.innerHTML = html`<h2>Kurze Pause</h2><p>${text}</p><p><button class="btn" id="cont">Weiter</button></p>`;
+      document.getElementById('cont').onclick = next;
+    }}
+  }
+
+  function trialBlockSimple({leftLabel,rightLabel,leftStim,rightStim,nTrials}){
+    const trials = sampleWithReplacement(
+      leftStim.map(s=>({stim:s, side:'left'})).concat(rightStim.map(s=>({stim:s, side:'right'}))), nTrials);
+    return trials.map(t=>({
+      type:'trial', blockType:'single', phase:'practice', leftLabel,rightLabel,
+      stim:t.stim, correct_side:t.side
+    }));
+  }
+
+  function trialBlockCombined({leftTop,rightTop,leftTargets,rightTargets,leftAttrs,rightAttrs,nTrials,tag}){
+    const pool=[];
+    leftTargets.forEach(s=>pool.push({stim:s, side:'left', cat:'target'}));
+    rightTargets.forEach(s=>pool.push({stim:s, side:'right', cat:'target'}));
+    leftAttrs.forEach(s=>pool.push({stim:s, side:'left', cat:'attr'}));
+    rightAttrs.forEach(s=>pool.push({stim:s, side:'right', cat:'attr'}));
+    const trials = sampleWithReplacement(pool, nTrials);
+    return trials.map(t=>({
+      type:'trial', blockType:'combined', phase:'test', leftTop,rightTop,
+      stim:t.stim, correct_side:t.side, stimType:t.cat, tag
+    }));
+  }
+
+  // Build timeline
+  timeline.push(screenIntro());
+
+  // initial side mapping for targets
+  let leftTargetA  = startCompatibleLeft ? TARGET_LEFT_LABEL_A : TARGET_RIGHT_LABEL_A;
+  let rightTargetA = startCompatibleLeft ? TARGET_RIGHT_LABEL_A : TARGET_LEFT_LABEL_A;
+  let leftTargetStimA  = startCompatibleLeft ? TARGET_LEFT_STIMULI : TARGET_RIGHT_STIMULI;
+  let rightTargetStimA = startCompatibleLeft ? TARGET_RIGHT_STIMULI : TARGET_LEFT_STIMULI;
+
+  timeline = timeline
+    .concat(trialBlockSimple({leftLabel:leftTargetA,rightLabel:rightTargetA,leftStim:leftTargetStimA,rightStim:rightTargetStimA,nTrials:N_PRACTICE_TARGET}))
+    .concat([pauseScreen('Gleich kommen schöne und nicht so schöne Dinge dazu.')])
+    .concat(trialBlockSimple({leftLabel:ATTR_LEFT_LABEL,rightLabel:ATTR_RIGHT_LABEL,leftStim:GOOD_STIMULI,rightStim:BAD_STIMULI,nTrials:N_PRACTICE_ATTR}))
+    .concat([pauseScreen('Jetzt wird gemischt. Achte oben auf die Überschriften!')])
+    .concat(trialBlockCombined({
+      leftTop:`${leftTargetA} <br/> oder <br/> ${ATTR_LEFT_LABEL}`,
+      rightTop:`${rightTargetA} <br/> oder <br/> ${ATTR_RIGHT_LABEL}`,
+      leftTargets:leftTargetStimA, rightTargets:rightTargetStimA,
+      leftAttrs:GOOD_STIMULI, rightAttrs:BAD_STIMULI,
+      nTrials:N_COMBO_A, tag:'A'
+    }))
+    .concat([pauseScreen('Jetzt tauschen die Personen links/rechts die Seite.')]);
+
+  // swap targets
+  let leftTargetB  = rightTargetA; let rightTargetB = leftTargetA;
+  let leftTargetStimB  = rightTargetStimA; let rightTargetStimB = leftTargetStimA;
+
+  timeline = timeline
+    .concat(trialBlockSimple({leftLabel:leftTargetB,rightLabel:rightTargetB,leftStim:leftTargetStimB,rightStim:rightTargetStimB,nTrials:N_PRACTICE_SWAP}))
+    .concat([pauseScreen('Noch einmal die Mischung – gut auf die Überschriften schauen!')])
+    .concat(trialBlockCombined({
+      leftTop:`${leftTargetB} <br/> oder <br/> ${ATTR_LEFT_LABEL}`,
+      rightTop:`${rightTargetB} <br/> oder <br/> ${ATTR_RIGHT_LABEL}`,
+      leftTargets:leftTargetStimB, rightTargets:rightTargetStimB,
+      leftAttrs:GOOD_STIMULI, rightAttrs:BAD_STIMULI,
+      nTrials:N_COMBO_B, tag:'B'
+    }));
+
+  // ============================ Laufzeit ==============================
+  let cursor = 0;
+  let listening = false;
+  let trialStart = 0;
+  const rows = []; // data rows
+
+  function showCats(leftHTML,rightHTML){
+    $cats.style.display='flex';
+    $catL.innerHTML = leftHTML; $catR.innerHTML = rightHTML;
+  }
+  function hideCats(){ $cats.style.display='none'; }
+
+  function renderTrial(t){
+    // labels
+    if(t.blockType==='single'){
+      showCats(t.leftLabel, t.rightLabel);
+    } else {
+      showCats(t.leftTop, t.rightTop);
+    }
+    // stimulus
+    $app.innerHTML = html`<div class="stim" aria-live="polite">${t.stim}</div><p class="muted">Drücke <b>F</b> für links oder <b>J</b> für rechts.</p>`;
+    trialStart = performance.now();
+    listening = true;
+  }
+
+  function renderScreen(s){ s.render(); }
+
+  function next(){
+    if(cursor>=timeline.length){ finish(); return; }
+    const item = timeline[cursor++];
+    if(item.type==='trial') renderTrial(item); else renderScreen(item);
+  }
+
+  function feedback(ok){
+    const el = document.createElement('div');
+    el.className = 'feedback ' + (ok?'ok':'bad');
+    el.textContent = ok ? '✓' : '✗';
+    document.body.appendChild(el);
+    setTimeout(()=>el.remove(), 220);
+  }
+
+  function onKey(e){
+    if(!listening) return;
+    const k = (e.key||'').toLowerCase();
+    if(k!=='f' && k!=='j') return;
+    listening = false;
+    const t = timeline[cursor-1];
+    const rtRaw = Math.max(1, Math.round(performance.now() - trialStart));
+    const respSide = (k==='f') ? 'left' : 'right';
+    const correct = (respSide === t.correct_side);
+    const rtAdj = correct ? rtRaw : rtRaw + ERROR_PENALTY_MS;
+    rows.push({
+      phase: t.phase||'', blockType: t.blockType||'', tag: t.tag||'',
+      stim: t.stim||'', stimType: t.stimType||'',
+      correct_side: t.correct_side||'', response_side: respSide,
+      correct: correct?1:0, rt: rtAdj, rt_raw: rtRaw
+    });
+    feedback(correct);
+    setTimeout(next, 120);
+  }
+
+  document.addEventListener('keydown', onKey);
+
+  // ============================ Abschluss =============================
+  function computeD(){
+    const comb = rows.filter(r=>r.blockType==='combined');
+    if(comb.length===0) return {D:0,meanA:0,meanB:0,fastProp:0,n:0};
+    const valid = comb.filter(r=>r.rt < 10000);
+    const fastProp = comb.filter(r=>r.rt_raw < 300).length / comb.length;
+    const A = valid.filter(r=>r.tag==='A').map(r=>r.rt);
+    const B = valid.filter(r=>r.tag==='B').map(r=>r.rt);
+    const mean = arr => arr.length?arr.reduce((a,b)=>a+b,0)/arr.length:0;
+    const mA = mean(A), mB = mean(B);
+    const all = A.concat(B);
+    const mAll = mean(all);
+    const sd = all.length>1 ? Math.sqrt(all.reduce((acc,x)=>acc+Math.pow(x-mAll,2),0)/(all.length-1)) : 0;
+    const D = sd>0 ? (mB - mA)/sd : 0;
+    return {D,meanA:mA,meanB:mB,fastProp,n:valid.length};
+  }
+
+  function interpretD(D){
+    if(D <= -0.65) return 'starke Präferenz für Kombination B';
+    if(D <= -0.35) return 'mittlere Präferenz für Kombination B';
+    if(D <  -0.15) return 'leichte Präferenz für Kombination B';
+    if(D <   0.15) return 'keine/geringe Präferenz';
+    if(D <   0.35) return 'leichte Präferenz für Kombination A';
+    if(D <   0.65) return 'mittlere Präferenz für Kombination A';
+    return 'starke Präferenz für Kombination A';
+  }
+
+  function csvEscape(v){ if(v==null) return ''; const s=String(v); if(/[",\n]/.test(s)) return '"'+s.replace(/"/g,'""')+'"'; return s; }
+  function makeCSV(rows){
+    const cols = ['phase','blockType','tag','stim','stimType','correct_side','response_side','correct','rt','rt_raw'];
+    const lines = [cols.join(',')];
+    rows.forEach(r=>{ lines.push(cols.map(c=>csvEscape(r[c])).join(',')); });
+    return lines.join('\n');
+  }
+
+  function finish(){
+    hideCats();
+    const {D,meanA,meanB,fastProp,n} = computeD();
+    const pairingA = `${startCompatibleLeft?TARGET_LEFT_LABEL_A:TARGET_RIGHT_LABEL_A} + Gut (links)`;
+    const pairingB = `${startCompatibleLeft?TARGET_RIGHT_LABEL_A:TARGET_LEFT_LABEL_A} + Gut (links)`;
+    const warn = fastProp>0.1 ? '<p style="color:var(--bad)"><b>Hinweis:</b> Viele extrem schnelle Antworten (<300 ms). Daten evtl. unzuverlässig.</p>' : '';
+    $app.innerHTML = html`
+      <h2>Geschafft!</h2>
+      <p>Danke fürs Mitmachen. Hier ist deine kindgerechte Zusammenfassung:</p>
+      <div style="background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:12px 16px;max-width:720px;margin:0 auto 16px">
+        <p><b>Runde A</b> ("${pairingA}") Durchschnitt: <b>${Math.round(meanA)} ms</b><br>
+        <b>Runde B</b> ("${pairingB}") Durchschnitt: <b>${Math.round(meanB)} ms</b></p>
+        <p><b>D‑Wert:</b> ${D.toFixed(2)} → <b>${interpretD(D)}</b></p>
+        <p class="muted">Der D‑Wert vergleicht die Schnelligkeit der beiden gemischten Runden. Er urteilt nicht über Personen.</p>
+      </div>
+      ${warn}
+      <p><button class="btn" id="dl">Daten als CSV herunterladen</button></p>
+    `;
+    document.getElementById('dl').onclick = ()=>{
+      const blob = new Blob([makeCSV(rows)], {type:'text/csv'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href=url; a.download='child_iat_daten.csv'; a.click();
+      setTimeout(()=>URL.revokeObjectURL(url), 400);
+    };
+  }
+
+  // Start
+  next();
+})();
+</script>
+</body>
+</html>
